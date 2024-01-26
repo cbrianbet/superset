@@ -1,9 +1,10 @@
+import json
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Depends, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, EmailStr, SecretStr
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, text
 import random
 import requests
@@ -23,7 +24,6 @@ engine = create_engine(DATABASE_URL)
 
 @app.get('/api2')
 async def custom_swagger_ui_html():
-    print(app.openapi_url)
     return get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=app.title + " - Swagger UI",
@@ -31,6 +31,7 @@ async def custom_swagger_ui_html():
         swagger_js_url="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js",
         swagger_css_url="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css",
     )
+
 
 def create_original_user_roles_table():
     with engine.connect() as connection:
@@ -100,7 +101,8 @@ def get_bearer_token():
             token = response.json()
             return token['access_token']
         else:
-            raise HTTPException(status_code=response.status_code, detail=response.json())
+            raise HTTPException(status_code=response.status_code,
+                                detail=response.json())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -123,19 +125,13 @@ def get_csrf_token():
 
 @app.get('/api2/update_user_role/')
 async def update_user_role_endpoint(
-    email: str = Query(..., title="User Email"),
+    user_id: str = Query(..., title="User ID"),
     tenant_id: int = Query(..., title="Tenant ID"),
     response: Response = Response,
 ):
     try:
         with engine.connect() as connection:
-            # Retrieve the current role for later reset
-            select_query = text(f"SELECT id FROM public.ab_user WHERE email='{email}'")
-            # role_query = text("SELECT id FROM ab_role WHERE name=:email")
-            result = connection.execute(select_query)
-            user_id = result.scalar()
             print(user_id)
-
             # Update the user role
             update_user_role(user_id, tenant_id)
 
@@ -216,7 +212,8 @@ async def user_create(user: UserCreate):
         if response.status_code in [200, 201, 202]:
             return {"status": "success", "response": response.json()}
         else:
-            raise HTTPException(status_code=response.status_code, detail=response.json())
+            raise HTTPException(status_code=response.status_code,
+                                detail=response.json())
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -258,7 +255,102 @@ async def create_database(db: DbCreate):
         if response.status_code in [200, 201, 202]:
             return {"status": "success", "response": response.json()}
         else:
-            raise HTTPException(status_code=response.status_code, detail=response.json())
+            raise HTTPException(status_code=response.status_code,
+                                detail=response.json())
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def permissions(url, headers):
+    query = {
+        "page": 0,
+        "page_size": 100
+    }
+    permissions_list = []
+    response = requests.get(url=f'{url}?q={json.dumps(query)}', headers=headers)
+
+    if response.status_code in [200]:
+        permissions_list += response.json()["result"]
+        number_of_pages = (response.json()["count"]) // query["page_size"]
+        for page in range(1, number_of_pages + 1):
+            query["page"] = page
+            response = requests.get(url=f'{url}?q={json.dumps(query)}', headers=headers)
+            permissions_list += response.json()["result"]
+    return permissions_list
+
+
+@app.get('/api2/list/permission-resources')
+async def list_permission_resources():
+    try:
+        permissions_url = f'{os.getenv("BASE_URL")}/api/v1/security/permissions-resources/'
+        headers = {
+            "Authorization": f"Bearer {get_bearer_token()}",
+            "Content-Type": "application/json"
+        }
+        response = permissions(permissions_url, headers)
+        return {"status": "success", "permissions": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get('/api2/list/permission-role/{role_id}')
+async def list_permission_roles(role_id: int):
+    try:
+        permissions_url = f'{os.getenv("BASE_URL")}/api/v1/security/roles/{role_id}/permissions/'
+        headers = {
+            "Authorization": f"Bearer {get_bearer_token()}",
+            "Content-Type": "application/json"
+        }
+        response = requests.get(url=permissions_url, headers=headers)
+        if response.status_code in [200]:
+            return {"status": "success", "role_permissions": response.json()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+class RolePermissionsCreate(BaseModel):
+    permission_view_menu_ids: list[int]
+
+
+@app.post('/api2/add/permissions-role/{role_id}')
+async def add_permission_role(role_id: int, perms: RolePermissionsCreate):
+    try:
+        permissions_url = f'{os.getenv("BASE_URL")}/api/v1/security/roles/{role_id}/permissions'
+        headers = {
+            "Authorization": f"Bearer {get_bearer_token()}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(url=permissions_url, headers=headers, json=perms.__dict__)
+        if response.status_code in [200, 201]:
+            return {"status": "success", "role_permissions": response.json()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    active: Optional[bool] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    roles: Optional[list[int]] = None
+
+
+@app.put('/api2/update/user/{user_id}')
+async def add_permission_role(user_id: int, user: UserUpdate):
+    try:
+        user_url = f'{os.getenv("BASE_URL")}/api/v1/security/users/{user_id}'
+        headers = {
+            "Authorization": f"Bearer {get_bearer_token()}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(url=user_url, headers=headers, json=user.__dict__)
+        if response.status_code in [200, 201]:
+            return {"status": "success", "role_permissions": response.json()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
